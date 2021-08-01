@@ -1,0 +1,157 @@
+package server;
+
+import server.AuthService;
+import server.Server;
+
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.net.Socket;
+import java.util.Optional;
+import java.util.Timer;
+import java.util.TimerTask;
+
+public class ClientHandler {
+
+
+    private Server server;
+    private DataInputStream in;
+    private DataOutputStream out;
+    private String name;
+    private boolean isAuthentificated;
+
+
+    public ClientHandler(Server server, Socket socket) {
+        try {
+            this.server = server;
+            in = new DataInputStream(socket.getInputStream());
+            out = new DataOutputStream(socket.getOutputStream());
+
+            new Thread(() -> {
+                try {
+                    terminatingIfNoAuthentication(socket);
+                    doAuthentication();
+                    listenMessages();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                } finally {
+                    server.unsubscribe(this);
+                    server.broadcastMessage(String.format("User[%s] is out.", name));
+                    closeConnection(socket);
+                }
+            })
+                    .start();
+        } catch (IOException e) {
+            throw new RuntimeException("Something went wrong during client establishing...", e);
+        }
+    }
+
+    private void closeConnection(Socket socket) {
+
+        try {
+            in.close();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        try {
+            out.close();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        try {
+            socket.close();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    private void doAuthentication() throws IOException {
+        sendMessage("Greeting you in the Outstanding Chat.");
+        sendMessage("Please do authentication. Template is: -auth [login] [password]");
+
+
+
+        while (true) {
+            String maybeCredentials = in.readUTF();
+            /** sample: -auth login1 password1 */
+
+
+            if (maybeCredentials.startsWith("-auth")) {
+                String[] credentials = maybeCredentials.split("\\s");
+
+                Optional<AuthService.Entry> maybeUser = server.getAuthService()
+                        .findUserByLoginAndPassword(credentials[1], credentials[2]);
+
+                if (maybeUser.isPresent()) {
+                    AuthService.Entry user = maybeUser.get();
+                    if (server.isNotUserOccupied(user.getName())) {
+                        name = user.getName();
+                        sendMessage("AUTH OK.");
+                        sendMessage("Welcome.");
+                        server.broadcastMessage(String.format("User[%s] entered chat.", name));
+                        server.subscribe(this);
+                        isAuthentificated = true;
+                        return;
+                    } else {
+                        sendMessage("Current user is already logged in");
+                    }
+                } else {
+                    sendMessage("Invalid credentials.");
+                }
+            } else {
+                sendMessage("Invalid auth operation");
+            }
+        }
+
+
+    }
+
+    public void sendMessage(String outboundMessage) {
+        try {
+            out.writeUTF(outboundMessage);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void listenMessages() throws IOException {
+        while (true) {
+            String inboundMessage = in.readUTF();
+            if (inboundMessage.equals("-exit")) {
+                break;
+            }
+            if(inboundMessage.startsWith("-w")){
+                String[] messageParts = inboundMessage.split("\\s");
+                String receiverName = messageParts[1];
+                String privateMessage = inboundMessage.substring(receiverName.length() + 4);
+
+                server.broadcastPrivateMessage(privateMessage, receiverName, this);
+                continue;
+            }
+            server.broadcastMessage(inboundMessage);
+        }
+    }
+
+
+        public void terminatingIfNoAuthentication(Socket socket){
+            TimerTask terminateConnection = new TimerTask() {
+                @Override
+                public void run(){
+                    sendMessage("Вы не авторизовались в течение 2 минут.\nВаше соединение прервано");
+                    closeConnection(socket);
+                }
+            };
+
+            Timer terminatingTimer = new Timer();
+            if(isAuthentificated == false) {
+               terminatingTimer.schedule(terminateConnection, 120000);
+            }
+        }
+
+}
